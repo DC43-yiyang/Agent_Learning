@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gene Agent · BioReAct</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,600;1,400&family=Syne:wght@400;700;800&display=swap');
+
+  :root {
+    --bg: #0a0e0f;
+    --surface: #111618;
+    --border: #1e2729;
+    --accent: #00e5a0;
+    --accent2: #00a8ff;
+    --warn: #ff6b35;
+    --text: #d4e0e3;
+    --muted: #4a6068;
+    --tool-bg: #0d1a1e;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    min-height: 100vh;
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    grid-template-rows: 64px 1fr;
+  }
+
+  /* ── Header ── */
+  header {
+    grid-column: 1 / -1;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 28px;
+    gap: 16px;
+  }
+
+  .logo {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 18px;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+  }
+  .logo span { color: var(--text); font-weight: 400; }
+
+  .header-tag {
+    font-size: 10px;
+    background: #0d2a1e;
+    color: var(--accent);
+    border: 1px solid #1a4a35;
+    padding: 3px 10px;
+    border-radius: 20px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .status-dot {
+    margin-left: auto;
+    width: 8px; height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ── Sidebar ── */
+  aside {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    overflow-y: auto;
+  }
+
+  .section-label {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .query-input-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  textarea {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    padding: 12px;
+    border-radius: 6px;
+    resize: vertical;
+    min-height: 90px;
+    outline: none;
+    transition: border-color 0.2s;
+    line-height: 1.6;
+  }
+  textarea:focus { border-color: var(--accent); }
+
+  .run-btn {
+    background: var(--accent);
+    color: #000;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 13px;
+    border: none;
+    padding: 11px;
+    border-radius: 6px;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .run-btn:hover { background: #00ffb3; transform: translateY(-1px); }
+  .run-btn:active { transform: translateY(0); }
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  .quick-genes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .gene-chip {
+    font-size: 11px;
+    padding: 4px 10px;
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: var(--accent2);
+  }
+  .gene-chip:hover {
+    border-color: var(--accent2);
+    background: #0d1e2a;
+  }
+
+  .tool-list { display: flex; flex-direction: column; gap: 8px; }
+  .tool-item {
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .tool-name {
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+  .tool-desc { font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+  /* ── Main ── */
+  main {
+    padding: 28px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .empty-state {
+    margin: auto;
+    text-align: center;
+    color: var(--muted);
+  }
+  .empty-state .big { font-size: 48px; margin-bottom: 12px; }
+  .empty-state p { font-size: 13px; line-height: 1.8; }
+
+  /* ── Step Cards ── */
+  .step-card {
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    animation: slideIn 0.3s ease;
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .step-header {
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .step-icon { font-size: 16px; }
+
+  .step-card.tool-call .step-header {
+    background: #0d1e1a;
+    color: var(--accent);
+    border-bottom: 1px solid #1a3a2e;
+  }
+  .step-card.tool-result .step-header {
+    background: #0d1a26;
+    color: var(--accent2);
+    border-bottom: 1px solid #1a2e40;
+  }
+  .step-card.final-answer .step-header {
+    background: #1a0d0a;
+    color: var(--warn);
+    border-bottom: 1px solid #3a1e16;
+  }
+  .step-card.thinking .step-header {
+    background: #141014;
+    color: #a080c0;
+    border-bottom: 1px solid #2a1e35;
+  }
+
+  .step-body {
+    background: var(--bg);
+    padding: 16px;
+    font-size: 12.5px;
+    line-height: 1.8;
+  }
+
+  pre {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11.5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #8abfc8;
+    margin-top: 8px;
+  }
+
+  .arg-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .arg-key { color: var(--muted); min-width: 100px; }
+  .arg-val { color: var(--accent2); }
+
+  .final-content {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    line-height: 1.9;
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+
+  /* Loading */
+  .loading-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .summary-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: flex;
+    gap: 24px;
+    font-size: 12px;
+  }
+  .summary-item { display: flex; gap: 8px; align-items: center; }
+  .summary-num { font-family: 'Syne', sans-serif; font-size: 20px; font-weight: 700; color: var(--accent); }
+  .summary-lbl { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">BioReAct<span> · Gene Agent</span></div>
+  <div class="header-tag">ReAct Demo</div>
+  <div class="header-tag" style="color:var(--accent2); background:#0d1a2a; border-color:#1a3a55;">qwen3:30b-a3b</div>
+  <div class="status-dot" id="statusDot"></div>
+</header>
+
+<aside>
+  <div>
+    <div class="section-label">Query Gene</div>
+    <div class="query-input-wrap">
+      <textarea id="queryInput" placeholder="e.g. Query detailed information about TP53 gene">Query detailed information about TP53 gene</textarea>
+      <button class="run-btn" id="runBtn" onclick="runAgent()">
+        <span>▶ Run Agent</span>
+      </button>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-label">Quick Select</div>
+    <div class="quick-genes">
+      <div class="gene-chip" onclick="setGene('TP53')">TP53</div>
+      <div class="gene-chip" onclick="setGene('BRCA1')">BRCA1</div>
+      <div class="gene-chip" onclick="setGene('EGFR')">EGFR</div>
+      <div class="gene-chip" onclick="setGene('PTEN')">PTEN</div>
+      <div class="gene-chip" onclick="setGene('MYC')">MYC</div>
+      <div class="gene-chip" onclick="setGene('NF2')">NF2</div>
+      <div class="gene-chip" onclick="setGene('KRAS')">KRAS</div>
+      <div class="gene-chip" onclick="setGene('CDH1')">CDH1</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-label">Available Tools</div>
+    <div class="tool-list">
+      <div class="tool-item">
+        <div class="tool-name">search_gene_ncbi</div>
+        <div class="tool-desc">NCBI Entrez API · Gene ID, chromosome location, function summary</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_uniprot_function</div>
+        <div class="tool-desc">UniProt API · Protein function, associated diseases, reviewed entries</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top:auto">
+    <div class="section-label">Instructions</div>
+    <div style="font-size:11px; color:var(--muted); line-height:1.8">
+      This UI calls locally running<br>
+      <span style="color:var(--accent)">gene_agent.py</span> (port 5001)<br><br>
+      Start the backend first:<br>
+      <span style="color:var(--accent2)">python gene_agent_server.py</span>
+    </div>
+  </div>
+</aside>
+
+<main id="mainPanel">
+  <div class="empty-state">
+    <div class="big">🧬</div>
+    <p>Select a gene or enter a query<br>Watch the Agent's ReAct reasoning process</p>
+  </div>
+</main>
+
+<script>
+function setGene(gene) {
+  document.getElementById('queryInput').value = `Query detailed information about ${gene} gene`;
+}
+
+function renderStep(step) {
+  const panel = document.getElementById('mainPanel');
+
+  if (step.type === 'tool_call') {
+    const card = document.createElement('div');
+    card.className = 'step-card tool-call';
+    const args = Object.entries(step.args).map(([k, v]) =>
+      `<div class="arg-row"><span class="arg-key">${k}</span><span class="arg-val">"${v}"</span></div>`
+    ).join('');
+    card.innerHTML = `
+      <div class="step-header">
+        <span class="step-icon">🔧</span>
+        ACT · Call tool → ${step.tool}
+      </div>
+      <div class="step-body">${args}</div>`;
+    panel.appendChild(card);
+
+  } else if (step.type === 'tool_result') {
+    const card = document.createElement('div');
+    card.className = 'step-card tool-result';
+    const resultStr = JSON.stringify(step.result, null, 2);
+    card.innerHTML = `
+      <div class="step-header">
+        <span class="step-icon">📡</span>
+        OBSERVE · ${step.tool} returned result
+      </div>
+      <div class="step-body"><pre>${escHtml(resultStr)}</pre></div>`;
+    panel.appendChild(card);
+
+  } else if (step.type === 'final_answer') {
+    const card = document.createElement('div');
+    card.className = 'step-card final-answer';
+    card.innerHTML = `
+      <div class="step-header">
+        <span class="step-icon">📋</span>
+        FINAL ANSWER · Report
+      </div>
+      <div class="step-body">
+        <div class="final-content">${escHtml(step.content)}</div>
+      </div>`;
+    panel.appendChild(card);
+  }
+
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function runAgent() {
+  const query = document.getElementById('queryInput').value.trim();
+  if (!query) return;
+
+  const panel = document.getElementById('mainPanel');
+  const btn = document.getElementById('runBtn');
+
+  panel.innerHTML = '';
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div><span>Running...</span>';
+
+  // Loading indicator
+  const loadingCard = document.createElement('div');
+  loadingCard.className = 'loading-card';
+  loadingCard.id = 'loadingCard';
+  loadingCard.innerHTML = '<div class="spinner"></div><span>Agent is thinking...</span>';
+  panel.appendChild(loadingCard);
+
+  try {
+    const resp = await fetch('http://localhost:5001/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+
+    const data = await resp.json();
+    document.getElementById('loadingCard')?.remove();
+
+    // Render summary
+    const toolCalls = data.steps.filter(s => s.type === 'tool_call').length;
+    const summary = document.createElement('div');
+    summary.className = 'summary-bar';
+    summary.innerHTML = `
+      <div class="summary-item"><span class="summary-num">${toolCalls}</span><span class="summary-lbl">Tool calls</span></div>
+      <div class="summary-item"><span class="summary-num">${data.steps.length}</span><span class="summary-lbl">Total steps</span></div>
+      <div class="summary-item" style="margin-left:auto; color:var(--accent); font-size:11px;">✓ Done</div>
+    `;
+    panel.appendChild(summary);
+
+    // Render steps with delay for animation
+    for (let i = 0; i < data.steps.length; i++) {
+      await new Promise(r => setTimeout(r, 150));
+      renderStep(data.steps[i]);
+    }
+
+  } catch (err) {
+    document.getElementById('loadingCard')?.remove();
+    panel.innerHTML = `
+      <div class="step-card" style="border-color:#3a1e16">
+        <div class="step-header" style="background:#1a0d0a; color:var(--warn)">
+          ⚠ Connection failed
+        </div>
+        <div class="step-body" style="font-size:12px; color:var(--muted)">
+          Cannot connect to gene_agent_server.py (localhost:5001)<br><br>
+          Please run the backend first:<br>
+          <pre>python gene_agent_server.py</pre>
+        </div>
+      </div>`;
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<span>▶ Run Agent</span>';
+}
+</script>
+</body>
+</html>
