@@ -28,6 +28,27 @@ python gene_agent_server.py
 
 Then open http://localhost:5001 in your browser.
 
+## Environment Management with uv
+
+Use `uv` only for creating and maintaining the local environment (you can manage versions yourself):
+
+```bash
+# (Re)create / update the virtualenv from pyproject.toml / uv.lock
+uv sync
+
+# Add or update a dependency (example)
+uv add flask-cors
+
+# Remove a dependency (example)
+uv remove flask-cors
+```
+
+To run code inside this environment you can either:
+
+- `uv run python gene_agent_skills.py`  
+  or  
+- `.venv/bin/python gene_agent_skills.py`
+
 ## Project Structure
 
 ```

@@ -1,15 +1,27 @@
 """
 gene_agent_server.py
-Wraps gene_agent.py as HTTP service for frontend interface
+Wraps the gene agent as an HTTP service for the frontend interface.
 Dependencies: pip install flask flask-cors
 """
 
+import os
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from gene_agent import run_agent
+
+from tools import GeneTools
+from agent import GeneAgent
 
 app = Flask(__name__)
 CORS(app)  # Allow local frontend cross-origin requests
+
+# Initialise once at startup — not on every request
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_agent = GeneAgent(
+    tools=GeneTools(),
+    skills_dir=os.path.join(_script_dir, "skills"),
+)
+
 
 @app.route("/run", methods=["POST"])
 def run():
@@ -17,9 +29,9 @@ def run():
     query = data.get("query", "").strip()
     if not query:
         return jsonify({"error": "query is required"}), 400
-    
+
     try:
-        answer, steps = run_agent(query, verbose=True)
+        answer, steps = _agent.run(query, verbose=True)
         # Ensure all steps are JSON serializable
         serializable_steps = []
         for step in steps:

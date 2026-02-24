@@ -207,12 +207,22 @@ class GeneAgent:
         skill_names = self._route(user_query, verbose)
         all_answers, all_steps = [], []
 
+        # Record the router's decision as an explicit step for visualization
+        all_steps.append({"type": "skill_route", "selected": skill_names})
+
         for name in skill_names:
             if name not in self.skills:
                 if verbose:
                     print(f"⚠️  Unknown skill '{name}', skipping.")
                 continue
-            answer, steps = self._run_skill(self.skills[name], user_query, verbose)
+            skill = self.skills[name]
+            # Mark the boundary where this skill's steps begin
+            all_steps.append({
+                "type": "skill_start",
+                "skill": name,
+                "description": skill["metadata"]["description"],
+            })
+            answer, steps = self._run_skill(skill, user_query, verbose)
             all_answers.append(answer)
             all_steps.extend(steps)
 

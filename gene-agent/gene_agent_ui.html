@@ -232,6 +232,28 @@
     color: #a080c0;
     border-bottom: 1px solid #2a1e35;
   }
+  .step-card.skill-route .step-header {
+    background: #1a1428;
+    color: #c084fc;
+    border-bottom: 1px solid #3a2460;
+  }
+  .step-card.skill-start .step-header {
+    background: #0f1f28;
+    color: #38bdf8;
+    border-bottom: 1px solid #1e4060;
+  }
+  .skill-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    margin: 2px 4px 2px 0;
+    background: #2a1a40;
+    color: #c084fc;
+    border: 1px solid #4a2a70;
+  }
 
   .step-body {
     background: var(--bg);
@@ -357,9 +379,9 @@
     <div class="section-label">Instructions</div>
     <div style="font-size:11px; color:var(--muted); line-height:1.8">
       This UI calls locally running<br>
-      <span style="color:var(--accent)">gene_agent.py</span> (port 5001)<br><br>
+      <span style="color:var(--accent)">gene_agent_server.py</span> (port 5001)<br><br>
       Start the backend first:<br>
-      <span style="color:var(--accent2)">python gene_agent_server.py</span>
+      <span style="color:var(--accent2)">uv run gene_agent_server.py</span>
     </div>
   </div>
 </aside>
@@ -417,6 +439,31 @@ function renderStep(step) {
         <div class="final-content">${escHtml(step.content)}</div>
       </div>`;
     panel.appendChild(card);
+
+  } else if (step.type === 'skill_route') {
+    const badges = step.selected.map(s =>
+      `<span class="skill-badge">${s}</span>`
+    ).join('');
+    const card = document.createElement('div');
+    card.className = 'step-card skill-route';
+    card.innerHTML = `
+      <div class="step-header">
+        <span class="step-icon">🗺️</span>
+        ROUTE · Router selected ${step.selected.length} skill(s)
+      </div>
+      <div class="step-body">${badges}</div>`;
+    panel.appendChild(card);
+
+  } else if (step.type === 'skill_start') {
+    const card = document.createElement('div');
+    card.className = 'step-card skill-start';
+    card.innerHTML = `
+      <div class="step-header">
+        <span class="step-icon">📖</span>
+        SKILL · Running: ${step.skill}
+      </div>
+      <div class="step-body" style="font-size:11.5px; color:var(--muted)">${escHtml(step.description)}</div>`;
+    panel.appendChild(card);
   }
 
   panel.scrollTop = panel.scrollHeight;
@@ -456,9 +503,12 @@ async function runAgent() {
 
     // Render summary
     const toolCalls = data.steps.filter(s => s.type === 'tool_call').length;
+    const routeStep = data.steps.find(s => s.type === 'skill_route');
+    const skillsUsed = routeStep ? routeStep.selected.length : 0;
     const summary = document.createElement('div');
     summary.className = 'summary-bar';
     summary.innerHTML = `
+      <div class="summary-item"><span class="summary-num" style="color:#c084fc">${skillsUsed}</span><span class="summary-lbl">Skills used</span></div>
       <div class="summary-item"><span class="summary-num">${toolCalls}</span><span class="summary-lbl">Tool calls</span></div>
       <div class="summary-item"><span class="summary-num">${data.steps.length}</span><span class="summary-lbl">Total steps</span></div>
       <div class="summary-item" style="margin-left:auto; color:var(--accent); font-size:11px;">✓ Done</div>
