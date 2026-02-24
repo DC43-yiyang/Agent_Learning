@@ -1,89 +1,40 @@
 """
 SkillLoader + GeneAgent — Orchestration Layer
 =============================================
-Responsibility: load skills, route queries, run the ReAct loop.
+Phase 2 (MCP) changes vs Phase 1:
 
-This module has NO knowledge of HTTP calls or external APIs.
-It only knows: "ask tools.execute(), add result to messages, repeat."
+  Before: agent.py imports tools.py directly (Python import)
+  After:  agent.py connects to mcp_server.py via MCP protocol
 
-Dependencies:
-  tools.py  → GeneTools (injected via __init__)
-  skills/   → skill markdown files (loaded by SkillLoader)
+Key differences:
+  - GeneAgent no longer receives a GeneTools instance
+  - Instead it receives the path to mcp_server.py
+  - Tools are DISCOVERED at runtime via session.list_tools()
+    (agent doesn't need to know what tools exist in advance)
+  - Tool calls go through session.call_tool() — a network-like call
+    over stdio, not a direct Python function call
+  - All methods are async because MCP client is async
 """
 
+import asyncio
 import json
 import os
 
 import ollama
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
-from tools import GeneTools
-
-
-# ─────────────────────────────────────────────
-# SkillLoader
-# Reads .md files from the skills directory and parses frontmatter.
-# ─────────────────────────────────────────────
-
-class SkillLoader:
-    def __init__(self, skills_dir: str = "./skills"):
-        self.skills_dir = skills_dir
-        self._cache = {}
-
-    def load(self, skill_name: str) -> dict:
-        if skill_name in self._cache:
-            return self._cache[skill_name]
-
-        skill_path = os.path.join(self.skills_dir, f"{skill_name}.md")
-        if not os.path.exists(skill_path):
-            raise FileNotFoundError(f"Skill file not found: {skill_path}")
-
-        with open(skill_path, "r", encoding="utf-8") as f:
-            raw = f.read()
-
-        skill = self._parse(skill_name, raw)
-        self._cache[skill_name] = skill
-        return skill
-
-    def _parse(self, name: str, raw: str) -> dict:
-        metadata = {"name": name, "description": "", "version": "1.0", "tools": []}
-        body = raw
-
-        if raw.startswith("---"):
-            parts = raw.split("---", 2)
-            if len(parts) >= 3:
-                frontmatter = parts[1].strip()
-                body = parts[2].strip()
-                for line in frontmatter.splitlines():
-                    if ":" in line:
-                        key, _, val = line.partition(":")
-                        key = key.strip()
-                        val = val.strip()
-                        if key == "description":
-                            metadata["description"] = val
-                        elif key == "version":
-                            metadata["version"] = val
-                    elif line.strip().startswith("-"):
-                        tool = line.strip().lstrip("-").strip()
-                        if tool:
-                            metadata["tools"].append(tool)
-
-        return {"metadata": metadata, "body": body, "system_prompt": body}
-
-    def list_skills(self) -> list:
-        if not os.path.exists(self.skills_dir):
-            return []
-        return [f.replace(".md", "") for f in os.listdir(self.skills_dir) if f.endswith(".md")]
+from skill_loader import SkillLoader
 
 
 # ─────────────────────────────────────────────
-# GeneAgent
-# Orchestrates skill routing and the ReAct loop.
-# Delegates all tool execution to a GeneTools instance.
+# GeneAgent  (Orchestration Layer)
 # ─────────────────────────────────────────────
 
 class GeneAgent:
-    def __init__(self, tools: GeneTools, skills_dir: str = "./skills"):
-        self.tools = tools
+    def __init__(self, mcp_server_script: str, skills_dir: str = "./skills"):
+        # Path to mcp_server.py — agent will spawn it as a subprocess
+        self.mcp_server_script = mcp_server_script
         self.loader = SkillLoader(skills_dir)
         self.skills = {
             name: self.loader.load(name)
@@ -91,19 +42,51 @@ class GeneAgent:
         }
         print(f"✅ Loaded {len(self.skills)} skills: {list(self.skills.keys())}")
 
+    # ── MCP helpers ───────────────────────────────────────────────────────────
+
+    async def _discover_tools(self, session: ClientSession) -> list:
+        """Ask the MCP server what tools it has, convert to Ollama format.
+
+        This is the core of MCP's value: the agent does not hardcode tool
+        definitions. It asks the server at runtime. Add a new tool to
+        mcp_server.py and the agent picks it up automatically — zero changes
+        here.
+        """
+        response = await session.list_tools()
+
+        # MCP tool schema  →  Ollama tool schema
+        # MCP uses "inputSchema", Ollama uses "parameters" inside "function"
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.inputSchema,
+                },
+            }
+            for tool in response.tools
+        ]
+
+    async def _call_tool(self, session: ClientSession, name: str, arguments: dict) -> dict:
+        """Call a tool on the MCP server and return the parsed result.
+
+        mcp_server.py returns results as TextContent (a JSON string).
+        We parse it back to a dict so the rest of the agent code is unchanged.
+        """
+        result = await session.call_tool(name, arguments)
+        return json.loads(result.content[0].text)
+
     # ── Routing ───────────────────────────────────────────────────────────────
 
-    def _route(self, query: str, verbose: bool) -> list[str]:
-        """Use the LLM to select which skill(s) are needed for this query.
-
-        The skill's frontmatter `description` is what the router reads —
-        that is why writing a good description in each .md file matters.
-        """
+    async def _route(self, query: str, verbose: bool) -> list[str]:
+        """Use LLM to select which skills are needed for this query."""
         menu = "\n".join(
             f"- {name}: {skill['metadata']['description']}"
             for name, skill in self.skills.items()
         )
-        response = ollama.chat(
+        client = ollama.AsyncClient()
+        response = await client.chat(
             model="qwen3:30b-a3b",
             messages=[{
                 "role": "user",
@@ -124,27 +107,41 @@ class GeneAgent:
 
     # ── Per-skill tool filtering ──────────────────────────────────────────────
 
-    def _tools_for_skill(self, skill: dict) -> list:
-        """Filter to only the tools listed in the skill's frontmatter.
+    def _tools_for_skill(self, skill: dict, all_tools: list) -> list:
+        """Filter the MCP-discovered tool list to only what this skill declares.
 
-        Ensures gene_genomics can never accidentally trigger a UniProt call,
-        and vice versa.
+        Same logic as before — but now `all_tools` comes from the MCP server,
+        not from tools.py. The skill frontmatter still controls access.
         """
         allowed = set(skill["metadata"]["tools"])
-        return [t for t in self.tools.schemas if t["function"]["name"] in allowed]
+        return [t for t in all_tools if t["function"]["name"] in allowed]
 
     # ── Single-skill ReAct loop ───────────────────────────────────────────────
 
-    def _run_skill(self, skill: dict, user_query: str, verbose: bool) -> tuple:
-        """Run the ReAct loop for one skill. Returns (answer, steps)."""
+    async def _run_skill(
+        self,
+        session: ClientSession,
+        skill: dict,
+        all_tools: list,
+        user_query: str,
+        verbose: bool,
+    ) -> tuple:
+        """Run the ReAct loop for one skill.
+
+        The only change from the sync version:
+          - ollama.AsyncClient().chat()  instead of  ollama.chat()
+          - await self._call_tool()      instead of  self.tools.execute()
+        The loop structure is identical.
+        """
         skill_name = skill["metadata"]["name"]
-        skill_tools = self._tools_for_skill(skill)
+        skill_tools = self._tools_for_skill(skill, all_tools)
 
         messages = [
             {"role": "system", "content": skill["system_prompt"]},
             {"role": "user", "content": user_query},
         ]
         steps = []
+        client = ollama.AsyncClient()
 
         if verbose:
             print(f"\n{'─' * 60}")
@@ -155,7 +152,7 @@ class GeneAgent:
             if verbose:
                 print(f"\n[Round {iteration + 1}] Reasoning...")
 
-            response = ollama.chat(
+            response = await client.chat(
                 model="qwen3:30b-a3b",
                 messages=messages,
                 tools=skill_tools,
@@ -175,8 +172,8 @@ class GeneAgent:
 
                     steps.append({"type": "tool_call", "tool": tool_name, "args": tool_args})
 
-                    # Delegate execution entirely to the tools layer
-                    tool_result = self.tools.execute(tool_name, **tool_args)
+                    # ← Key change: call via MCP, not via tools.py
+                    tool_result = await self._call_tool(session, tool_name, tool_args)
 
                     if verbose:
                         print(f"   ↳ Returned {len(str(tool_result))} characters.")
@@ -197,33 +194,56 @@ class GeneAgent:
 
     # ── Public entry point ────────────────────────────────────────────────────
 
-    def run(self, user_query: str, verbose: bool = True) -> tuple:
-        """Route the query, then run each selected skill in order."""
+    async def run(self, user_query: str, verbose: bool = True) -> tuple:
+        """
+        Connect to MCP server → discover tools → route → run skills → disconnect.
+
+        The MCP connection is opened once per query and shared across all
+        skill runs. This is why async matters: the connection stays alive
+        while we await LLM responses in _run_skill().
+        """
         if verbose:
             print(f"\n{'=' * 60}")
             print(f"🧬 Query: {user_query}")
             print(f"{'=' * 60}")
 
-        skill_names = self._route(user_query, verbose)
-        all_answers, all_steps = [], []
+        # Spawn mcp_server.py as a subprocess and connect to it via stdio
+        server_params = StdioServerParameters(
+            command="uv",
+            args=["run", self.mcp_server_script],
+        )
 
-        # Record the router's decision as an explicit step for visualization
-        all_steps.append({"type": "skill_route", "selected": skill_names})
+        async with stdio_client(server_params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                # Handshake: client and server agree on protocol version
+                await session.initialize()
 
-        for name in skill_names:
-            if name not in self.skills:
+                # Discover what tools the server exposes
+                all_tools = await self._discover_tools(session)
                 if verbose:
-                    print(f"⚠️  Unknown skill '{name}', skipping.")
-                continue
-            skill = self.skills[name]
-            # Mark the boundary where this skill's steps begin
-            all_steps.append({
-                "type": "skill_start",
-                "skill": name,
-                "description": skill["metadata"]["description"],
-            })
-            answer, steps = self._run_skill(skill, user_query, verbose)
-            all_answers.append(answer)
-            all_steps.extend(steps)
+                    tool_names = [t["function"]["name"] for t in all_tools]
+                    print(f"🔌 MCP connected · tools discovered: {tool_names}")
+
+                skill_names = await self._route(user_query, verbose)
+                all_answers, all_steps = [], []
+
+                all_steps.append({"type": "skill_route", "selected": skill_names})
+
+                for name in skill_names:
+                    if name not in self.skills:
+                        if verbose:
+                            print(f"⚠️  Unknown skill '{name}', skipping.")
+                        continue
+                    skill = self.skills[name]
+                    all_steps.append({
+                        "type": "skill_start",
+                        "skill": name,
+                        "description": skill["metadata"]["description"],
+                    })
+                    answer, steps = await self._run_skill(
+                        session, skill, all_tools, user_query, verbose
+                    )
+                    all_answers.append(answer)
+                    all_steps.extend(steps)
 
         return "\n\n---\n\n".join(all_answers), all_steps

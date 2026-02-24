@@ -1,31 +1,31 @@
 """
-Entry point — wire up the layers and run.
+Entry point — wire up and run.
+asyncio.run() is the single bridge between sync (the OS) and async (the agent).
 """
 
+import asyncio
 import os
 
-from tools import GeneTools
 from agent import GeneAgent
 
 
-def main():
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    skills_dir = os.path.join(_script_dir, "skills")
-
-    # Dependency injection: GeneAgent receives GeneTools, not the other way around
-    tools = GeneTools()
-    agent = GeneAgent(tools=tools, skills_dir=skills_dir)
+async def main():
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    agent = GeneAgent(
+        mcp_server_script=os.path.join(_dir, "mcp_server.py"),
+        skills_dir=os.path.join(_dir, "skills"),
+    )
 
     queries = [
-        "Which chromosome is BRCA1 on?",           # expects: gene_genomics only
-        "Give me a full analysis of TP53",          # expects: gene_genomics + gene_proteomics
+        "Which chromosome is BRCA1 on?",         # expects: gene_genomics only
+        "Give me a full analysis of TP53",        # expects: both skills
     ]
 
     for query in queries:
-        answer, steps = agent.run(query, verbose=True)
+        answer, steps = await agent.run(query, verbose=True)
         tool_calls = len([s for s in steps if s["type"] == "tool_call"])
-        print(f"\n✅ Done, executed {tool_calls} tool call(s)\n")
+        print(f"\n✅ Done, {tool_calls} tool call(s)\n")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())   # ← sync world hands control to async world, once

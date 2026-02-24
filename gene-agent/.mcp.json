@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "gene-tools": {
+      "type": "stdio",
+      "command": "/home/compbiowizard_ravenclaw/projects/YiyangDemo/gene-agent/.venv/bin/python",
+      "args": [
+        "mcp_server.py"
+      ],
+      "env": {}
+    }
+  }
+}
