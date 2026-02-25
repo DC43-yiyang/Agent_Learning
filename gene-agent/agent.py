@@ -1,39 +1,25 @@
 """
 SkillLoader + GeneAgent — Orchestration Layer
 =============================================
-Phase 2 (MCP) changes vs Phase 1:
-
-  Before: agent.py imports tools.py directly (Python import)
-  After:  agent.py connects to mcp_server.py via MCP protocol
-
-Key differences:
-  - GeneAgent no longer receives a GeneTools instance
-  - Instead it receives the path to mcp_server.py
-  - Tools are DISCOVERED at runtime via session.list_tools()
-    (agent doesn't need to know what tools exist in advance)
-  - Tool calls go through session.call_tool() — a network-like call
-    over stdio, not a direct Python function call
-  - All methods are async because MCP client is async
+All LLM calls now go through the openai SDK regardless of provider.
+Provider selection (local Ollama / DeepSeek / MiniMax) is passed per
+request to run(), not stored on the agent — so one GeneAgent instance
+handles all providers without reinitialisation.
 """
 
-import asyncio
 import json
 import os
+import re
 
-import ollama
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from providers import get_client, PROVIDER_CONFIGS
 from skill_loader import SkillLoader
 
 
-# ─────────────────────────────────────────────
-# GeneAgent  (Orchestration Layer)
-# ─────────────────────────────────────────────
-
 class GeneAgent:
     def __init__(self, mcp_server_script: str, skills_dir: str = "./skills"):
-        # Path to mcp_server.py — agent will spawn it as a subprocess
         self.mcp_server_script = mcp_server_script
         self.loader = SkillLoader(skills_dir)
         self.skills = {
@@ -45,17 +31,8 @@ class GeneAgent:
     # ── MCP helpers ───────────────────────────────────────────────────────────
 
     async def _discover_tools(self, session: ClientSession) -> list:
-        """Ask the MCP server what tools it has, convert to Ollama format.
-
-        This is the core of MCP's value: the agent does not hardcode tool
-        definitions. It asks the server at runtime. Add a new tool to
-        mcp_server.py and the agent picks it up automatically — zero changes
-        here.
-        """
+        """Discover tools from MCP server and convert to OpenAI tool schema."""
         response = await session.list_tools()
-
-        # MCP tool schema  →  Ollama tool schema
-        # MCP uses "inputSchema", Ollama uses "parameters" inside "function"
         return [
             {
                 "type": "function",
@@ -69,25 +46,20 @@ class GeneAgent:
         ]
 
     async def _call_tool(self, session: ClientSession, name: str, arguments: dict) -> dict:
-        """Call a tool on the MCP server and return the parsed result.
-
-        mcp_server.py returns results as TextContent (a JSON string).
-        We parse it back to a dict so the rest of the agent code is unchanged.
-        """
+        """Call a tool on the MCP server and return parsed result."""
         result = await session.call_tool(name, arguments)
         return json.loads(result.content[0].text)
 
     # ── Routing ───────────────────────────────────────────────────────────────
 
-    async def _route(self, query: str, verbose: bool) -> list[str]:
+    async def _route(self, query: str, client, model: str, verbose: bool) -> list[str]:
         """Use LLM to select which skills are needed for this query."""
         menu = "\n".join(
             f"- {name}: {skill['metadata']['description']}"
             for name, skill in self.skills.items()
         )
-        client = ollama.AsyncClient()
-        response = await client.chat(
-            model="qwen3:30b-a3b",
+        response = await client.chat.completions.create(
+            model=model,
             messages=[{
                 "role": "user",
                 "content": (
@@ -98,9 +70,13 @@ class GeneAgent:
                     'Example: ["gene_genomics"] or ["gene_genomics", "gene_proteomics"]'
                 ),
             }],
-            options={"temperature": 0},
+            temperature=0,
         )
-        selected = json.loads(response.message.content.strip())
+        content = (response.choices[0].message.content or "").strip()
+        match = re.search(r'\[.*?\]', content, re.DOTALL)
+        if not match:
+            raise ValueError(f"Router did not return a JSON array. Got: {repr(content)}")
+        selected = json.loads(match.group())
         if verbose:
             print(f"🗺️  Router selected: {selected}")
         return selected
@@ -108,11 +84,6 @@ class GeneAgent:
     # ── Per-skill tool filtering ──────────────────────────────────────────────
 
     def _tools_for_skill(self, skill: dict, all_tools: list) -> list:
-        """Filter the MCP-discovered tool list to only what this skill declares.
-
-        Same logic as before — but now `all_tools` comes from the MCP server,
-        not from tools.py. The skill frontmatter still controls access.
-        """
         allowed = set(skill["metadata"]["tools"])
         return [t for t in all_tools if t["function"]["name"] in allowed]
 
@@ -124,15 +95,11 @@ class GeneAgent:
         skill: dict,
         all_tools: list,
         user_query: str,
+        client,
+        model: str,
         verbose: bool,
     ) -> tuple:
-        """Run the ReAct loop for one skill.
-
-        The only change from the sync version:
-          - ollama.AsyncClient().chat()  instead of  ollama.chat()
-          - await self._call_tool()      instead of  self.tools.execute()
-        The loop structure is identical.
-        """
+        """Run the ReAct loop for one skill using the given LLM client."""
         skill_name = skill["metadata"]["name"]
         skill_tools = self._tools_for_skill(skill, all_tools)
 
@@ -141,7 +108,6 @@ class GeneAgent:
             {"role": "user", "content": user_query},
         ]
         steps = []
-        client = ollama.AsyncClient()
 
         if verbose:
             print(f"\n{'─' * 60}")
@@ -152,38 +118,58 @@ class GeneAgent:
             if verbose:
                 print(f"\n[Round {iteration + 1}] Reasoning...")
 
-            response = await client.chat(
-                model="qwen3:30b-a3b",
+            response = await client.chat.completions.create(
+                model=model,
                 messages=messages,
                 tools=skill_tools,
-                options={"temperature": 0.6, "num_ctx": 8192},
+                temperature=0.6,
             )
-            message = response.message
+            msg = response.choices[0].message
 
-            if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = tool_call.function.arguments
-                    if isinstance(tool_args, str):
-                        tool_args = json.loads(tool_args) if tool_args else {}
+            if msg.tool_calls:
+                # Add assistant message with all tool calls (once, before results)
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
+
+                # Process each tool call and add its result
+                for tool_call in msg.tool_calls:
+                    name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
 
                     if verbose:
-                        print(f"\n🔧 Call tool: {tool_name}({tool_args})")
+                        print(f"\n🔧 Call tool: {name}({args})")
 
-                    steps.append({"type": "tool_call", "tool": tool_name, "args": tool_args})
+                    steps.append({"type": "tool_call", "tool": name, "args": args})
 
-                    # ← Key change: call via MCP, not via tools.py
-                    tool_result = await self._call_tool(session, tool_name, tool_args)
+                    tool_result = await self._call_tool(session, name, args)
 
                     if verbose:
                         print(f"   ↳ Returned {len(str(tool_result))} characters.")
 
-                    steps.append({"type": "tool_result", "tool": tool_name, "result": tool_result})
-                    messages.append({"role": "assistant", "content": "", "tool_calls": message.tool_calls})
-                    messages.append({"role": "tool", "content": json.dumps(tool_result, ensure_ascii=False)})
+                    steps.append({"type": "tool_result", "tool": name, "result": tool_result})
+
+                    # OpenAI format: tool result must reference the tool_call_id
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(tool_result, ensure_ascii=False),
+                    })
 
             else:
-                final_answer = message.content
+                final_answer = msg.content or ""
                 if verbose:
                     print(f"\n📋 [{skill_name}] Result:")
                     print(final_answer)
@@ -194,37 +180,45 @@ class GeneAgent:
 
     # ── Public entry point ────────────────────────────────────────────────────
 
-    async def run(self, user_query: str, verbose: bool = True) -> tuple:
+    async def run(
+        self,
+        user_query: str,
+        provider_name: str = "local",
+        api_key: str | None = None,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        verbose: bool = True,
+    ) -> tuple:
         """
-        Connect to MCP server → discover tools → route → run skills → disconnect.
+        Route the query, then run each selected skill.
 
-        The MCP connection is opened once per query and shared across all
-        skill runs. This is why async matters: the connection stays alive
-        while we await LLM responses in _run_skill().
+        provider_name: "local" | "deepseek" | "minimax"
+        api_key:       required for deepseek and minimax, ignored for local
         """
+        client, model = get_client(provider_name, api_key, model_name, base_url)
+        label = PROVIDER_CONFIGS[provider_name]["label"]
+
         if verbose:
             print(f"\n{'=' * 60}")
             print(f"🧬 Query: {user_query}")
+            print(f"🤖 Provider: {label} ({model})")
             print(f"{'=' * 60}")
 
-        # Spawn mcp_server.py as a subprocess and connect to it via stdio
         server_params = StdioServerParameters(
-            command="uv",
-            args=["run", self.mcp_server_script],
+            command="/home/compbiowizard_ravenclaw/projects/YiyangDemo/gene-agent/.venv/bin/python",
+            args=[self.mcp_server_script],
         )
 
         async with stdio_client(server_params) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
-                # Handshake: client and server agree on protocol version
                 await session.initialize()
 
-                # Discover what tools the server exposes
                 all_tools = await self._discover_tools(session)
                 if verbose:
                     tool_names = [t["function"]["name"] for t in all_tools]
-                    print(f"🔌 MCP connected · tools discovered: {tool_names}")
+                    print(f"🔌 MCP connected · tools: {tool_names}")
 
-                skill_names = await self._route(user_query, verbose)
+                skill_names = await self._route(user_query, client, model, verbose)
                 all_answers, all_steps = [], []
 
                 all_steps.append({"type": "skill_route", "selected": skill_names})
@@ -241,7 +235,7 @@ class GeneAgent:
                         "description": skill["metadata"]["description"],
                     })
                     answer, steps = await self._run_skill(
-                        session, skill, all_tools, user_query, verbose
+                        session, skill, all_tools, user_query, client, model, verbose
                     )
                     all_answers.append(answer)
                     all_steps.extend(steps)

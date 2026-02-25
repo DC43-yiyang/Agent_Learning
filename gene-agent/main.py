@@ -22,7 +22,7 @@ async def main():
     ]
 
     for query in queries:
-        answer, steps = await agent.run(query, verbose=True)
+        answer, steps = await agent.run(query, provider_name="local", verbose=True)
         tool_calls = len([s for s in steps if s["type"] == "tool_call"])
         print(f"\n✅ Done, {tool_calls} tool call(s)\n")
 
