@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "gene-tools": {
+      "command": "/home/compbiowizard_ravenclaw/projects/YiyangDemo/gene-agent/.venv/bin/python",
+      "args": ["/home/compbiowizard_ravenclaw/projects/YiyangDemo/gene-agent/mcp_server.py"],
+      "cwd": "/home/compbiowizard_ravenclaw/projects/YiyangDemo/gene-agent"
+    }
+  }
+}

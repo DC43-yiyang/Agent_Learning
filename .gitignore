@@ -16,3 +16,4 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+gene-agent/config/secret_key
