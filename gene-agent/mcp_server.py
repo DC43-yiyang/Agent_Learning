@@ -22,6 +22,7 @@ import json
 import os
 import re
 import tarfile
+import time
 from pathlib import Path
 
 import requests
@@ -128,12 +129,17 @@ def get_uniprot_function(gene_name: str, organism: str = "human") -> dict:
 
 _GEO_FTP_HOST = "ftp.ncbi.nlm.nih.gov"
 _DATA_EXTS = (".mtx.gz", ".mtx", ".tsv.gz", ".tsv", ".csv.gz", ".csv", ".h5", ".tar.gz")
+_SIZE_LIMIT_MB = 500   # skip individual files larger than this
+
+
+def _geo_series_base(accession: str) -> str:
+    m = re.match(r"GSE(\d+)", accession)
+    num = int(m.group(1))
+    return f"/geo/series/GSE{num // 1000}nnn/{accession}"
 
 
 def _geo_ftp_dir(accession: str) -> str:
-    m = re.match(r"GSE(\d+)", accession)
-    num = int(m.group(1))
-    return f"/geo/series/GSE{num // 1000}nnn/{accession}/suppl"
+    return f"{_geo_series_base(accession)}/suppl"
 
 
 def _list_ftp_files(ftp_dir: str) -> list[str]:
@@ -146,13 +152,77 @@ def _list_ftp_files(ftp_dir: str) -> list[str]:
     return [os.path.basename(p) for p in paths]
 
 
-def _download_file(ftp_dir: str, filename: str, dest: str) -> None:
+def _get_ftp_file_sizes(ftp_dir: str, filenames: list[str]) -> dict[str, float]:
+    """Return {filename: size_in_MB} for each file. -1 if size unavailable."""
+    sizes: dict[str, float] = {}
+    try:
+        with ftplib.FTP(_GEO_FTP_HOST, timeout=30) as ftp:
+            ftp.login()
+            ftp.set_pasv(True)
+            ftp.sendcmd("TYPE I")
+            for fname in filenames:
+                try:
+                    sizes[fname] = ftp.size(f"{ftp_dir}/{fname}") / (1024 * 1024)
+                except Exception:
+                    sizes[fname] = -1.0
+    except Exception:
+        sizes = {f: -1.0 for f in filenames}
+    return sizes
+
+
+def _fetch_entrez_metadata(accession: str) -> dict:
+    """
+    Use NCBI Entrez e-utils (REST, no biopython) to fetch series metadata:
+    title, summary, n_samples, pubmed_ids, organism, submission date.
+    Returns empty dict on any failure.
+    """
+    try:
+        # esearch: accession → internal GDS id
+        search = requests.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params={"db": "gds", "term": f"{accession}[Accession]", "retmode": "json"},
+            timeout=20,
+        )
+        ids = search.json().get("esearchresult", {}).get("idlist", [])
+        if not ids:
+            return {}
+
+        # esummary: internal id → rich metadata
+        summary = requests.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+            params={"db": "gds", "id": ids[0], "retmode": "json"},
+            timeout=20,
+        )
+        rec = summary.json().get("result", {}).get(ids[0], {})
+        return {
+            "title": rec.get("title", ""),
+            "summary": rec.get("summary", "")[:600],
+            "n_samples": rec.get("n_samples", "unknown"),
+            "organism": rec.get("taxon", ""),
+            "gse": rec.get("accession", accession),
+            "pubmed_ids": rec.get("pubmedids", []),
+            "submission_date": rec.get("pdat", ""),
+        }
+    except Exception:
+        return {}
+
+
+def _download_file_with_retry(ftp_dir: str, filename: str, dest: str, max_retries: int = 3) -> None:
+    """HTTP download via NCBI HTTPS endpoint with exponential-backoff retry."""
     url = f"https://{_GEO_FTP_HOST}{ftp_dir}/{filename}"
-    with requests.get(url, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
+    for attempt in range(max_retries):
+        try:
+            with requests.get(url, stream=True, timeout=600) as r:
+                r.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        f.write(chunk)
+            return
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** attempt
+            time.sleep(wait)
 
 
 def _group_by_sample(filenames: list[str]) -> dict[str, list[str]]:
@@ -229,12 +299,44 @@ def _load_delimited(file_path: Path, sep: str) -> tuple[sc.AnnData, str]:
     return adata, warning
 
 
+def _download_soft_file(accession: str, out: Path) -> str | None:
+    """
+    Download the SOFT family file from /soft/ — contains sample characteristics,
+    clinical annotations, and study metadata critical for downstream analysis.
+    Returns local path if successful, None otherwise.
+    """
+    soft_ftp_dir = f"{_geo_series_base(accession)}/soft"
+    try:
+        soft_files = _list_ftp_files(soft_ftp_dir)
+        # Select the family soft file (not XML, not miniml)
+        candidates = [
+            f for f in soft_files
+            if "family" in f.lower() and "xml" not in f.lower() and "miniml" not in f.lower()
+        ]
+        if not candidates:
+            return None
+        fname = candidates[0]
+        dest = out / fname
+        if not dest.exists():
+            _download_file_with_retry(soft_ftp_dir, fname, str(dest))
+        return str(dest)
+    except Exception:
+        return None
+
+
 def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
     """
     Download a GEO Series (GSE) dataset and save each sample as a .h5ad file.
 
-    Supports: 10x MTX (separate files or tar.gz), CSV, TSV.
-    Each GSM sample is saved independently to output_dir/accession/GSMXXXXX.h5ad.
+    Steps:
+      1. Fetch dataset metadata via NCBI Entrez (title, summary, n_samples, organism)
+      2. Download the SOFT family file — sample-level annotations (tissue, disease, etc.)
+      3. List supplementary files, check sizes, skip files > 500 MB
+      4. Group files by GSM sample ID; download each sample's files with retry
+      5. Detect format (10x MTX / tar.gz / CSV / TSV), load with scanpy, save as .h5ad
+
+    Each GSM sample saved to: output_dir/accession/GSMXXXXX.h5ad
+    SOFT file saved to:        output_dir/accession/
 
     Args:
         accession:  GEO Series ID, e.g. "GSE12345"
@@ -242,9 +344,12 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
 
     Returns:
         dict with keys:
-          accession  – the normalised accession
-          samples    – list of {sample_id, h5ad_path, n_cells, n_genes, format[, warning]}
-          errors     – list of error strings for samples that failed
+          accession    – normalised accession
+          metadata     – Entrez dataset info (title, summary, n_samples, organism, pubmed_ids)
+          soft_path    – local path to SOFT family file (or null)
+          samples      – list of {sample_id, h5ad_path, n_cells, n_genes, format[, warning]}
+          skipped      – files skipped due to size limit with their sizes in MB
+          errors       – list of error strings for samples that failed
     """
     accession = accession.strip().upper()
     if not re.match(r"^GSE\d+$", accession):
@@ -253,21 +358,44 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
     out = Path(output_dir) / accession
     out.mkdir(parents=True, exist_ok=True)
 
+    # Step 1: Entrez metadata (non-fatal — proceed even if it fails)
+    metadata = _fetch_entrez_metadata(accession)
+
+    # Step 2: SOFT family file
+    soft_path = _download_soft_file(accession, out)
+
+    # Step 3: List supplementary files
     ftp_dir = _geo_ftp_dir(accession)
     try:
         all_files = _list_ftp_files(ftp_dir)
     except Exception as e:
-        return {"error": f"FTP listing failed: {e}"}
+        return {"error": f"FTP listing failed: {e}", "metadata": metadata}
 
     if not all_files:
-        return {"error": f"No supplementary files found for {accession}"}
+        return {"error": f"No supplementary files found for {accession}", "metadata": metadata}
 
     data_files = [f for f in all_files if any(f.lower().endswith(e) for e in _DATA_EXTS)]
     if not data_files:
-        return {"error": "No recognised data files found", "all_suppl_files": all_files}
+        return {
+            "error": "No recognised data files found",
+            "all_suppl_files": all_files,
+            "metadata": metadata,
+        }
+
+    # Check file sizes before downloading — skip oversize files
+    sizes = _get_ftp_file_sizes(ftp_dir, data_files)
+    skipped = {f: f"{sizes[f]:.1f} MB" for f in data_files if 0 < sizes[f] > _SIZE_LIMIT_MB}
+    data_files = [f for f in data_files if sizes.get(f, 0) <= _SIZE_LIMIT_MB or sizes.get(f, 0) < 0]
 
     groups = _group_by_sample(data_files)
-    results: dict = {"accession": accession, "samples": [], "errors": []}
+    results: dict = {
+        "accession": accession,
+        "metadata": metadata,
+        "soft_path": soft_path,
+        "samples": [],
+        "skipped": skipped,
+        "errors": [],
+    }
 
     for sample_id, sample_files in sorted(groups.items()):
         sample_dir = out / sample_id
@@ -276,7 +404,7 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
             for fname in sample_files:
                 dest = sample_dir / fname
                 if not dest.exists():
-                    _download_file(ftp_dir, fname, str(dest))
+                    _download_file_with_retry(ftp_dir, fname, str(dest))
 
             fmt = _detect_format(sample_files)
             warning = ""
