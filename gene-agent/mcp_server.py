@@ -129,7 +129,7 @@ def get_uniprot_function(gene_name: str, organism: str = "human") -> dict:
 
 _GEO_FTP_HOST = "ftp.ncbi.nlm.nih.gov"
 _DATA_EXTS = (".mtx.gz", ".mtx", ".tsv.gz", ".tsv", ".csv.gz", ".csv", ".h5", ".tar.gz")
-_SIZE_LIMIT_MB = 500   # skip individual files larger than this
+_SIZE_LIMIT_MB = 2000  # skip individual files larger than this
 
 
 def _geo_series_base(accession: str) -> str:

@@ -45,7 +45,7 @@ GEO scRNA-seq data appears in several formats — the tool handles all of them:
 | CSV/TSV | dense matrix file | May be genes×cells — auto-transposition applied if detected |
 
 ### 4. File Size Awareness
-- Files >500 MB are skipped automatically — check `skipped` in the result
+- Files >2000 MB are skipped automatically — check `skipped` in the result
 - If important files were skipped, inform the user that the data may be incomplete
 - Large datasets (many GSMs or large matrices) can take several minutes to download
 
