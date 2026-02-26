@@ -8,8 +8,12 @@ Local Ollama is accessed via its built-in OpenAI-compatible endpoint
 To add a new provider: add an entry to PROVIDER_CONFIGS.
 """
 
+import os
+
+from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+load_dotenv()
 
 PROVIDER_CONFIGS = {
     "local": {
@@ -20,9 +24,9 @@ PROVIDER_CONFIGS = {
     },
     "online": {
         "label": "Online",
-        "base_url": "https://api.vectorengine.ai/v1",
-        "api_key": None,            # provided via web UI at runtime
-        "model": None,              # provided via web UI at runtime
+        "base_url": os.getenv("ONLINE_BASE_URL", "https://api.vectorengine.ai/v1"),
+        "api_key": os.getenv("ONLINE_API_KEY"),
+        "model": os.getenv("ONLINE_MODEL", "MiniMax-M2.5"),
     },
 }
 

@@ -205,7 +205,7 @@ class GeneAgent:
             print(f"{'=' * 60}")
 
         server_params = StdioServerParameters(
-            command="/home/compbiowizard_ravenclaw/projects/YiyangDemo/gene-agent/.venv/bin/python",
+            command=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python"),
             args=[self.mcp_server_script],
         )
 
