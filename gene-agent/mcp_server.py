@@ -452,10 +452,9 @@ def _load_and_save_sample(
     sample_id: str,
     sample_dir: Path,
     filenames: list[str],
-    out: Path,
 ) -> dict:
     """
-    Detect format, load AnnData, make names unique, save as h5ad.
+    Detect format, load AnnData, make names unique, save as h5ad inside sample_dir.
     Returns the result entry dict (raises on failure).
     """
     fmt = _detect_format(filenames)
@@ -481,7 +480,7 @@ def _load_and_save_sample(
     adata.obs_names_make_unique()
     adata.var_names_make_unique()
 
-    h5ad_path = str(out / f"{sample_id}.h5ad")
+    h5ad_path = str(sample_dir / f"{sample_id}.h5ad")
     adata.write_h5ad(h5ad_path)
 
     entry = {
@@ -517,9 +516,12 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
     Output layout:
       output_dir/
       └── {accession}/
-          ├── {accession}_family.soft.gz   ← sample metadata (clinical, tissue, etc.)
-          ├── GSM5354513.h5ad              ← one h5ad per sample
-          ├── GSM5354514.h5ad
+          ├── {accession}_family.soft.gz
+          ├── GSM5354513/
+          │   ├── GSM5354513_CID3586.tar.gz
+          │   └── GSM5354513.h5ad          ← one h5ad per sample, inside sample dir
+          ├── GSM5354514/
+          │   └── GSM5354514.h5ad
           └── ...
 
     Returns dict: accession, metadata, soft_path, samples[], skipped{}, errors[]
@@ -581,7 +583,7 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
                         _download_url_with_retry(url, str(dest))
 
                 filenames = [os.path.basename(urlparse(u).path) for u in data_urls]
-                entry = _load_and_save_sample(gsm, sample_dir, filenames, out)
+                entry = _load_and_save_sample(gsm, sample_dir, filenames)
                 results["samples"].append(entry)
 
             except Exception as e:
@@ -619,7 +621,7 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
                     dest = sample_dir / fname
                     if not dest.exists():
                         _download_file_with_retry(ftp_dir, fname, str(dest))
-                entry = _load_and_save_sample(sample_id, sample_dir, sample_files, out)
+                entry = _load_and_save_sample(sample_id, sample_dir, sample_files)
                 results["samples"].append(entry)
             except Exception as e:
                 results["errors"].append(f"{sample_id}: {e}")
