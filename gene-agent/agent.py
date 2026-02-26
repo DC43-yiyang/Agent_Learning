@@ -10,6 +10,7 @@ handles all providers without reinitialisation.
 import json
 import os
 import re
+import subprocess
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -52,6 +53,16 @@ class GeneAgent:
 
     # ── Routing ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _gpu_available() -> bool:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi"], capture_output=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     async def _route(self, query: str, client, model: str, verbose: bool) -> list[str]:
         """Use LLM to select which skills are needed for this query."""
         menu = "\n".join(
@@ -65,7 +76,11 @@ class GeneAgent:
                 "content": (
                     f"User query: {query}\n\n"
                     f"Available skills:\n{menu}\n\n"
-                    "Which skills are needed to answer this query?\n"
+                    f"System info: GPU {'is' if self._gpu_available() else 'is NOT'} available "
+                    f"({'prefer sc_preprocess_gpu over sc_preprocess_cpu' if self._gpu_available() else 'use sc_preprocess_cpu, do not use sc_preprocess_gpu'}).\n\n"
+                    "Which skills are directly requested by the user query? "
+                    "Select ONLY the skills explicitly mentioned or clearly implied by the query. "
+                    "Do NOT add upstream prerequisite steps (e.g. download, QC) unless the user asked for them.\n"
                     "Reply with a JSON array of skill names only, no explanation.\n"
                     'Example: ["gene_genomics"] or ["gene_genomics", "gene_proteomics"]'
                 ),
@@ -127,6 +142,9 @@ class GeneAgent:
             msg = response.choices[0].message
 
             if msg.tool_calls:
+                if verbose and msg.content:
+                    print(f"   💭 Reasoning: {msg.content}")
+
                 # Add assistant message with all tool calls (once, before results)
                 messages.append({
                     "role": "assistant",
@@ -157,7 +175,8 @@ class GeneAgent:
                     tool_result = await self._call_tool(session, name, args)
 
                     if verbose:
-                        print(f"   ↳ Returned {len(str(tool_result))} characters.")
+                        result_preview = str(tool_result)[:300]
+                        print(f"   ↳ Result: {result_preview}{'...' if len(str(tool_result)) > 300 else ''}")
 
                     steps.append({"type": "tool_result", "tool": name, "result": tool_result})
 

@@ -464,7 +464,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             text=json.dumps({"error": f"Unknown tool: {name}"}),
         )]
 
-    result = dispatch[name](**arguments)
+    try:
+        result = dispatch[name](**arguments)
+    except Exception as e:
+        result = {"error": f"{type(e).__name__}: {e}"}
     return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
 

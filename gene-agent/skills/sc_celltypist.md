@@ -31,7 +31,7 @@ Full list: https://www.celltypist.org/models
 | output_path | ./sc_data/integrated_celltypist.h5ad | Output h5ad |
 | model | Cells_Adult_Breast.pkl | CellTypist model name |
 | majority_voting | true | Refine labels by majority vote within clusters |
-| over_clustering | leiden_r1 | Obs column used for majority voting |
+| over_clustering | leiden | Obs column used for majority voting |
 | use_raw | true | Use adata.raw for annotation (recommended) |
 
 ## Execution Steps

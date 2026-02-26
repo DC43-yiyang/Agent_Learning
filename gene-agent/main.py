@@ -41,7 +41,10 @@ async def main():
         # "Integrate GSE161529, GSE176078, GSE245601 into a single h5ad",
 
         # ── sc_preprocess skill ──────────────────────────────────────────────
-        # "Preprocess the integrated h5ad with Harmony batch correction",
+        "Preprocess the integrated h5ad with Harmony batch correction and UMAP clustering",
+
+        # ── sc_celltypist skill ──────────────────────────────────────────────
+        # "Annotate cell types in the preprocessed h5ad using CellTypist with the Cells_Adult_Breast model and majority voting over Leiden clusters",
     ]
 
     for query in queries:

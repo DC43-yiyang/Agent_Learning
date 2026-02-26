@@ -33,9 +33,9 @@ with Harmony batch correction to remove sample-level batch effects.
 | Parameter | Default | Description |
 |---|---|---|
 | batch_key | sample | Obs column for Harmony batch correction |
-| n_top_genes | 2000 | Number of highly variable genes |
+| n_top_genes | 3000 | Number of highly variable genes |
 | n_pcs | 50 | Number of principal components |
-| n_neighbors | 15 | k-NN graph neighbors |
+| n_neighbors | 50 | k-NN graph neighbors |
 | resolution | 0.5 | Leiden clustering resolution |
 
 ## Execution Steps

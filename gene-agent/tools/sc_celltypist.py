@@ -16,7 +16,7 @@ def sc_celltypist(
     output_path: str = "./sc_data/integrated_celltypist.h5ad",
     model: str = "Cells_Adult_Breast.pkl",
     majority_voting: bool = True,
-    over_clustering: str = "leiden_r1",
+    over_clustering: str = "leiden",
     use_raw: bool = True,
 ) -> dict:
     """
