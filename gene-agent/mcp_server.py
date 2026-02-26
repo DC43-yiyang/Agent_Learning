@@ -235,8 +235,7 @@ def _group_by_sample(filenames: list[str]) -> dict[str, list[str]]:
 
 
 def _detect_format(filenames: list[str]) -> str:
-    lower = [f.lower() for f in filenames]
-    if any("matrix.mtx" in f for f in lower):
+    if any(_is_mtx_file(f) for f in filenames):
         return "10x_mtx"
     if any(f.endswith(".tar.gz") for f in lower):
         return "tar_gz"
@@ -249,34 +248,115 @@ def _detect_format(filenames: list[str]) -> str:
     return "unknown"
 
 
+def _is_mtx_file(fname: str) -> bool:
+    fl = fname.lower()
+    return fl.endswith(".mtx") or fl.endswith(".mtx.gz")
+
+
 def _load_10x_mtx(sample_dir: Path, filenames: list[str]) -> sc.AnnData:
-    """Rename prefixed files to standard 10x names expected by scanpy, then load."""
-    for fname in filenames:
+    """
+    Load a 10x-style MTX directory robustly.
+
+    Unlike sc.read_10x_mtx, this handles:
+    - Non-standard filename prefixes (e.g. count_matrix_sparse.mtx)
+    - Uncompressed files (.mtx without .gz)
+    - Single-column gene files (gene symbols only, no Ensembl IDs)
+    - 2-column legacy (gene_id + gene_symbol) and 3-column modern formats
+    - Optional metadata.csv attached to adata.obs
+
+    MTX data is stored genes×cells; this function transposes to cells×genes.
+    """
+    import gzip
+    import anndata as ad
+    import scipy.io
+    import pandas as pd
+
+    # Locate the three required files by pattern matching
+    mtx_file = barcodes_file = genes_file = metadata_csv = None
+    for fname in sorted(filenames):          # sort for determinism
         fl = fname.lower()
-        if "matrix.mtx" in fl:
-            tgt = "matrix.mtx.gz" if fl.endswith(".gz") else "matrix.mtx"
-        elif "barcodes" in fl:
-            tgt = "barcodes.tsv.gz" if fl.endswith(".gz") else "barcodes.tsv"
-        elif "features" in fl or "genes" in fl:
-            tgt = "features.tsv.gz" if fl.endswith(".gz") else "features.tsv"
-        else:
+        p = sample_dir / fname
+        if not p.exists():
             continue
-        src, dst = sample_dir / fname, sample_dir / tgt
-        if src.exists() and src != dst:
-            src.rename(dst)
-    return sc.read_10x_mtx(str(sample_dir), var_names="gene_symbols", cache=False)
+        if _is_mtx_file(fname):
+            mtx_file = p
+        elif "barcodes" in fl and fl.endswith((".tsv", ".tsv.gz")):
+            barcodes_file = p
+        elif ("genes" in fl or "features" in fl) and fl.endswith((".tsv", ".tsv.gz")):
+            genes_file = p
+        elif fl == "metadata.csv":
+            metadata_csv = p
+
+    missing = [n for n, f in [("matrix", mtx_file), ("barcodes", barcodes_file), ("genes/features", genes_file)] if f is None]
+    if missing:
+        raise ValueError(f"Missing required MTX files: {missing}. Found: {[f.name for f in sample_dir.iterdir()]}")
+
+    # Read sparse matrix (genes × cells) → transpose to cells × genes
+    def _open(p: Path):
+        return gzip.open(p) if str(p).endswith(".gz") else open(p, "rb")
+
+    with _open(mtx_file) as f:
+        mat = scipy.io.mmread(f).T.tocsr()   # shape: cells × genes
+
+    # Read barcodes (always single column)
+    barcodes = pd.read_csv(str(barcodes_file), header=None, sep="\t")[0].tolist()
+
+    # Read gene/feature file — handle 1, 2, or 3-column variants
+    genes_df = pd.read_csv(str(genes_file), header=None, sep="\t")
+    if genes_df.shape[1] == 1:
+        gene_names = genes_df[0].tolist()
+        var_df = pd.DataFrame(index=gene_names)
+    elif genes_df.shape[1] == 2:
+        gene_names = genes_df[1].tolist()
+        var_df = pd.DataFrame({"gene_ids": genes_df[0].tolist()}, index=gene_names)
+    else:
+        gene_names = genes_df[1].tolist()
+        var_df = pd.DataFrame({
+            "gene_ids": genes_df[0].tolist(),
+            "feature_types": genes_df[2].tolist(),
+        }, index=gene_names)
+
+    adata = ad.AnnData(
+        X=mat,
+        obs=pd.DataFrame(index=barcodes),
+        var=var_df,
+    )
+
+    # Attach metadata.csv to obs when present (combined-matrix GEO releases)
+    if metadata_csv:
+        try:
+            meta = pd.read_csv(str(metadata_csv), index_col=0)
+            shared = adata.obs_names.intersection(meta.index)
+            if len(shared) > 0:
+                adata = adata[shared].copy()
+                adata.obs = meta.loc[shared]
+        except Exception:
+            pass  # best-effort
+
+    return adata
 
 
 def _load_tar_gz(tar_path: Path) -> sc.AnnData:
-    """Extract a tar.gz archive and load the 10x MTX inside it."""
+    """
+    Extract a tar.gz archive and load the 10x MTX inside it.
+    Detects any .mtx or .mtx.gz file regardless of filename prefix.
+    Reports found files in error message if no MTX is located.
+    """
     extract_dir = tar_path.parent / "extracted"
     extract_dir.mkdir(exist_ok=True)
     with tarfile.open(tar_path) as tar:
         tar.extractall(extract_dir)
+
     for root, _, files in os.walk(extract_dir):
-        if any("matrix.mtx" in f.lower() for f in files):
+        if any(_is_mtx_file(f) for f in files):
             return _load_10x_mtx(Path(root), files)
-    raise ValueError("No matrix.mtx found inside tar.gz")
+
+    # Collect found files for a helpful error message
+    found: list[str] = []
+    for root, _, files in os.walk(extract_dir):
+        rel = os.path.relpath(root, extract_dir)
+        found.extend(f"{rel}/{f}" for f in files)
+    raise ValueError(f"No .mtx file found inside tar.gz. Extracted: {found[:20]}")
 
 
 def _load_delimited(file_path: Path, sep: str) -> tuple[sc.AnnData, str]:
