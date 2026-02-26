@@ -12,7 +12,7 @@ preprocessed single-cell RNA-seq data using CellTypist.
 
 ## Prerequisites
 - A preprocessed h5ad must exist (output of `sc_preprocess_cpu` or `sc_preprocess_gpu`)
-- Default input: `./sc_data/integrated_rapids_processed.h5ad`
+- Default input: `./sc_data/integrated_processed.h5ad`
 - For breast cancer data the recommended model is `Cells_Adult_Breast.pkl`
 
 ## Available Models (selection)
@@ -27,7 +27,7 @@ Full list: https://www.celltypist.org/models
 ## Parameters
 | Parameter | Default | Description |
 |---|---|---|
-| input_path | ./sc_data/integrated_rapids_processed.h5ad | Preprocessed h5ad |
+| input_path | ./sc_data/integrated_processed.h5ad | Preprocessed h5ad |
 | output_path | ./sc_data/integrated_celltypist.h5ad | Output h5ad |
 | model | Cells_Adult_Breast.pkl | CellTypist model name |
 | majority_voting | true | Refine labels by majority vote within clusters |

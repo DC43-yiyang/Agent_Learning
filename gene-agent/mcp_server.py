@@ -372,8 +372,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "input_path": {
                         "type": "string",
-                        "description": "Path to preprocessed h5ad (default: ./sc_data/integrated_rapids_processed.h5ad)",
-                        "default": "./sc_data/integrated_rapids_processed.h5ad",
+                        "description": "Path to preprocessed h5ad (default: ./sc_data/integrated_processed.h5ad)",
+                        "default": "./sc_data/integrated_processed.h5ad",
                     },
                     "output_path": {
                         "type": "string",

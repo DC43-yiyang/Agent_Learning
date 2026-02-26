@@ -12,7 +12,7 @@ import scanpy as sc
 
 
 def sc_celltypist(
-    input_path: str = "./sc_data/integrated_rapids_processed.h5ad",
+    input_path: str = "./sc_data/integrated_processed.h5ad",
     output_path: str = "./sc_data/integrated_celltypist.h5ad",
     model: str = "Cells_Adult_Breast.pkl",
     majority_voting: bool = True,
