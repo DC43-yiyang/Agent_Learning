@@ -18,12 +18,14 @@ Once running, ANY MCP-compatible client can use these tools:
 
 import asyncio
 import ftplib
+import gzip
 import json
 import os
 import re
 import tarfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import scanpy as sc
@@ -235,6 +237,7 @@ def _group_by_sample(filenames: list[str]) -> dict[str, list[str]]:
 
 
 def _detect_format(filenames: list[str]) -> str:
+    lower = [f.lower() for f in filenames]
     if any(_is_mtx_file(f) for f in filenames):
         return "10x_mtx"
     if any(f.endswith(".tar.gz") for f in lower):
@@ -380,15 +383,10 @@ def _load_delimited(file_path: Path, sep: str) -> tuple[sc.AnnData, str]:
 
 
 def _download_soft_file(accession: str, out: Path) -> str | None:
-    """
-    Download the SOFT family file from /soft/ — contains sample characteristics,
-    clinical annotations, and study metadata critical for downstream analysis.
-    Returns local path if successful, None otherwise.
-    """
+    """Download the SOFT family file (contains per-sample metadata and FTP links)."""
     soft_ftp_dir = f"{_geo_series_base(accession)}/soft"
     try:
         soft_files = _list_ftp_files(soft_ftp_dir)
-        # Select the family soft file (not XML, not miniml)
         candidates = [
             f for f in soft_files
             if "family" in f.lower() and "xml" not in f.lower() and "miniml" not in f.lower()
@@ -404,32 +402,127 @@ def _download_soft_file(accession: str, out: Path) -> str | None:
         return None
 
 
+def _parse_soft_gsm_links(soft_path: str) -> dict[str, list[str]]:
+    """
+    Parse a GEO SOFT family file to extract per-GSM supplementary FTP URLs.
+
+    The SOFT file is the authoritative source for per-sample download links:
+      ^SAMPLE = GSM5354513
+      !Sample_supplementary_file_1 = ftp://ftp.ncbi.nlm.nih.gov/.../GSM5354513_CID3586.tar.gz
+
+    Returns {gsm_accession: [ftp_url, ...]} (only GSMs that have at least one link).
+    Streams line-by-line to handle large SOFT files without loading into memory.
+    """
+    gsm_links: dict[str, list[str]] = {}
+    current_gsm: str | None = None
+
+    opener = gzip.open if str(soft_path).endswith(".gz") else open
+    with opener(soft_path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("^SAMPLE = "):
+                current_gsm = line.split("=", 1)[1].strip()
+                gsm_links.setdefault(current_gsm, [])
+            elif current_gsm and "!Sample_supplementary_file" in line and "=" in line:
+                val = line.split("=", 1)[1].strip()
+                if val and val.upper() != "NONE" and val.startswith("ftp://"):
+                    gsm_links[current_gsm].append(val)
+
+    return {gsm: links for gsm, links in gsm_links.items() if links}
+
+
+def _download_url_with_retry(ftp_url: str, dest: str, max_retries: int = 3) -> None:
+    """Download a GEO FTP URL (ftp:// or https://) with exponential-backoff retry."""
+    url = ftp_url.replace("ftp://", "https://", 1) if ftp_url.startswith("ftp://") else ftp_url
+    for attempt in range(max_retries):
+        try:
+            with requests.get(url, stream=True, timeout=600) as r:
+                r.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        f.write(chunk)
+            return
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def _load_and_save_sample(
+    sample_id: str,
+    sample_dir: Path,
+    filenames: list[str],
+    out: Path,
+) -> dict:
+    """
+    Detect format, load AnnData, make names unique, save as h5ad.
+    Returns the result entry dict (raises on failure).
+    """
+    fmt = _detect_format(filenames)
+    warning = ""
+
+    if fmt == "10x_mtx":
+        adata = _load_10x_mtx(sample_dir, filenames)
+    elif fmt == "tar_gz":
+        tar_fname = next(f for f in filenames if f.lower().endswith(".tar.gz"))
+        adata = _load_tar_gz(sample_dir / tar_fname)
+    elif fmt == "csv":
+        csv_fname = next(f for f in filenames if "csv" in f.lower())
+        adata, warning = _load_delimited(sample_dir / csv_fname, sep=",")
+    elif fmt == "tsv":
+        tsv_fname = next(
+            f for f in filenames
+            if "tsv" in f.lower() and "barcodes" not in f.lower() and "features" not in f.lower()
+        )
+        adata, warning = _load_delimited(sample_dir / tsv_fname, sep="\t")
+    else:
+        raise ValueError(f"Unrecognised format. Files: {filenames}")
+
+    adata.obs_names_make_unique()
+    adata.var_names_make_unique()
+
+    h5ad_path = str(out / f"{sample_id}.h5ad")
+    adata.write_h5ad(h5ad_path)
+
+    entry = {
+        "sample_id": sample_id,
+        "h5ad_path": h5ad_path,
+        "n_cells": adata.n_obs,
+        "n_genes": adata.n_vars,
+        "format": fmt,
+    }
+    if warning:
+        entry["warning"] = warning
+    return entry
+
+
 def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
     """
-    Download a GEO Series (GSE) dataset and save each sample as a .h5ad file.
+    Download a GEO Series (GSE) and save each sample as an individual .h5ad file.
+
+    Strategy (primary → fallback):
+      PRIMARY  — Parse SOFT family file for per-GSM FTP links, download each GSM
+                 individually. This gives one h5ad per sample regardless of whether
+                 the series also provides a combined matrix.
+      FALLBACK — If SOFT parsing yields no links, fall back to series-level /suppl/
+                 files and group by GSM ID found in filename.
 
     Steps:
-      1. Fetch dataset metadata via NCBI Entrez (title, summary, n_samples, organism)
-      2. Download the SOFT family file — sample-level annotations (tissue, disease, etc.)
-      3. List supplementary files, check sizes, skip files > 500 MB
-      4. Group files by GSM sample ID; download each sample's files with retry
-      5. Detect format (10x MTX / tar.gz / CSV / TSV), load with scanpy, save as .h5ad
+      1. Fetch Entrez metadata (title, summary, n_samples, organism, pubmed_ids)
+      2. Download SOFT family file → used for metadata AND per-GSM link discovery
+      3. Parse SOFT → {GSM: [ftp_url, ...]}
+      4. For each GSM: check file size, download, detect format, save as h5ad
+      5. (Fallback) List series /suppl/, group by GSM prefix, same download+save loop
 
-    Each GSM sample saved to: output_dir/accession/GSMXXXXX.h5ad
-    SOFT file saved to:        output_dir/accession/
+    Output layout:
+      output_dir/
+      └── {accession}/
+          ├── {accession}_family.soft.gz   ← sample metadata (clinical, tissue, etc.)
+          ├── GSM5354513.h5ad              ← one h5ad per sample
+          ├── GSM5354514.h5ad
+          └── ...
 
-    Args:
-        accession:  GEO Series ID, e.g. "GSE12345"
-        output_dir: Base directory for output (default: ./sc_data)
-
-    Returns:
-        dict with keys:
-          accession    – normalised accession
-          metadata     – Entrez dataset info (title, summary, n_samples, organism, pubmed_ids)
-          soft_path    – local path to SOFT family file (or null)
-          samples      – list of {sample_id, h5ad_path, n_cells, n_genes, format[, warning]}
-          skipped      – files skipped due to size limit with their sizes in MB
-          errors       – list of error strings for samples that failed
+    Returns dict: accession, metadata, soft_path, samples[], skipped{}, errors[]
     """
     accession = accession.strip().upper()
     if not re.match(r"^GSE\d+$", accession):
@@ -438,95 +531,98 @@ def download_geo_dataset(accession: str, output_dir: str = "./sc_data") -> dict:
     out = Path(output_dir) / accession
     out.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Entrez metadata (non-fatal — proceed even if it fails)
     metadata = _fetch_entrez_metadata(accession)
-
-    # Step 2: SOFT family file
     soft_path = _download_soft_file(accession, out)
 
-    # Step 3: List supplementary files
-    ftp_dir = _geo_ftp_dir(accession)
-    try:
-        all_files = _list_ftp_files(ftp_dir)
-    except Exception as e:
-        return {"error": f"FTP listing failed: {e}", "metadata": metadata}
-
-    if not all_files:
-        return {"error": f"No supplementary files found for {accession}", "metadata": metadata}
-
-    data_files = [f for f in all_files if any(f.lower().endswith(e) for e in _DATA_EXTS)]
-    if not data_files:
-        return {
-            "error": "No recognised data files found",
-            "all_suppl_files": all_files,
-            "metadata": metadata,
-        }
-
-    # Check file sizes before downloading — skip oversize files
-    sizes = _get_ftp_file_sizes(ftp_dir, data_files)
-    skipped = {f: f"{sizes[f]:.1f} MB" for f in data_files if 0 < sizes[f] > _SIZE_LIMIT_MB}
-    data_files = [f for f in data_files if sizes.get(f, 0) <= _SIZE_LIMIT_MB or sizes.get(f, 0) < 0]
-
-    groups = _group_by_sample(data_files)
     results: dict = {
         "accession": accession,
         "metadata": metadata,
         "soft_path": soft_path,
         "samples": [],
-        "skipped": skipped,
+        "skipped": {},
         "errors": [],
     }
 
-    for sample_id, sample_files in sorted(groups.items()):
-        sample_dir = out / sample_id
-        sample_dir.mkdir(exist_ok=True)
+    # ── PRIMARY: per-GSM links from SOFT ─────────────────────────────────────
+    gsm_links: dict[str, list[str]] = {}
+    if soft_path:
         try:
-            for fname in sample_files:
-                dest = sample_dir / fname
-                if not dest.exists():
-                    _download_file_with_retry(ftp_dir, fname, str(dest))
+            gsm_links = _parse_soft_gsm_links(soft_path)
+        except Exception as e:
+            results["errors"].append(f"SOFT parse failed: {e}")
 
-            fmt = _detect_format(sample_files)
-            warning = ""
-
-            if fmt == "10x_mtx":
-                adata = _load_10x_mtx(sample_dir, sample_files)
-            elif fmt == "tar_gz":
-                tar_fname = next(f for f in sample_files if f.lower().endswith(".tar.gz"))
-                adata = _load_tar_gz(sample_dir / tar_fname)
-            elif fmt == "csv":
-                csv_fname = next(f for f in sample_files if "csv" in f.lower())
-                adata, warning = _load_delimited(sample_dir / csv_fname, sep=",")
-            elif fmt == "tsv":
-                # Skip standalone barcodes/features files; pick the matrix TSV
-                tsv_fname = next(
-                    f for f in sample_files
-                    if "tsv" in f.lower() and "barcodes" not in f.lower() and "features" not in f.lower()
-                )
-                adata, warning = _load_delimited(sample_dir / tsv_fname, sep="\t")
-            else:
-                results["errors"].append(f"{sample_id}: unrecognised format. Files: {sample_files}")
+    if gsm_links:
+        for gsm, ftp_urls in sorted(gsm_links.items()):
+            data_urls = [u for u in ftp_urls if any(u.lower().endswith(e) for e in _DATA_EXTS)]
+            if not data_urls:
                 continue
 
-            adata.obs_names_make_unique()
-            adata.var_names_make_unique()
+            sample_dir = out / gsm
+            sample_dir.mkdir(exist_ok=True)
+            try:
+                # Size check before download
+                for url in list(data_urls):
+                    fname = os.path.basename(urlparse(url).path)
+                    ftp_dir = os.path.dirname(urlparse(url).path)
+                    sizes = _get_ftp_file_sizes(ftp_dir, [fname])
+                    sz = sizes.get(fname, -1)
+                    if sz > _SIZE_LIMIT_MB:
+                        results["skipped"][fname] = f"{sz:.1f} MB"
+                        data_urls.remove(url)
 
-            h5ad_path = str(out / f"{sample_id}.h5ad")
-            adata.write_h5ad(h5ad_path)
+                if not data_urls:
+                    results["errors"].append(f"{gsm}: all files exceeded size limit")
+                    continue
 
-            entry = {
-                "sample_id": sample_id,
-                "h5ad_path": h5ad_path,
-                "n_cells": adata.n_obs,
-                "n_genes": adata.n_vars,
-                "format": fmt,
-            }
-            if warning:
-                entry["warning"] = warning
-            results["samples"].append(entry)
+                for url in data_urls:
+                    fname = os.path.basename(urlparse(url).path)
+                    dest = sample_dir / fname
+                    if not dest.exists():
+                        _download_url_with_retry(url, str(dest))
 
+                filenames = [os.path.basename(urlparse(u).path) for u in data_urls]
+                entry = _load_and_save_sample(gsm, sample_dir, filenames, out)
+                results["samples"].append(entry)
+
+            except Exception as e:
+                results["errors"].append(f"{gsm}: {e}")
+
+    # ── FALLBACK: series-level /suppl/ files ─────────────────────────────────
+    else:
+        ftp_dir = _geo_ftp_dir(accession)
+        try:
+            all_files = _list_ftp_files(ftp_dir)
         except Exception as e:
-            results["errors"].append(f"{sample_id}: {e}")
+            results["errors"].append(f"FTP listing failed: {e}")
+            return results
+
+        if not all_files:
+            results["errors"].append(f"No supplementary files found for {accession}")
+            return results
+
+        data_files = [f for f in all_files if any(f.lower().endswith(e) for e in _DATA_EXTS)]
+        if not data_files:
+            results["errors"].append("No recognised data files found")
+            results["all_suppl_files"] = all_files
+            return results
+
+        sizes = _get_ftp_file_sizes(ftp_dir, data_files)
+        skipped = {f: f"{sizes[f]:.1f} MB" for f in data_files if sizes.get(f, 0) > _SIZE_LIMIT_MB}
+        results["skipped"].update(skipped)
+        data_files = [f for f in data_files if sizes.get(f, 0) <= _SIZE_LIMIT_MB or sizes.get(f, 0) < 0]
+
+        for sample_id, sample_files in sorted(_group_by_sample(data_files).items()):
+            sample_dir = out / sample_id
+            sample_dir.mkdir(exist_ok=True)
+            try:
+                for fname in sample_files:
+                    dest = sample_dir / fname
+                    if not dest.exists():
+                        _download_file_with_retry(ftp_dir, fname, str(dest))
+                entry = _load_and_save_sample(sample_id, sample_dir, sample_files, out)
+                results["samples"].append(entry)
+            except Exception as e:
+                results["errors"].append(f"{sample_id}: {e}")
 
     return results
 
