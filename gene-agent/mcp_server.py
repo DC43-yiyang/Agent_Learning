@@ -15,7 +15,9 @@ from mcp import types
 from tools.gene_query import search_gene_ncbi, get_uniprot_function
 from tools.geo_search import search_geo_datasets, list_geo_samples
 from tools.geo_download import download_geo_raw, convert_geo_to_h5ad
-from tools.sc_pipeline import sc_qc, sc_integrate, sc_preprocess
+from tools.sc_integrate import sc_qc, sc_integrate
+from tools.sc_preprocess_cpu import sc_preprocess_cpu
+from tools.sc_preprocess_gpu import sc_preprocess_gpu
 
 
 # ─────────────────────────────────────────────
@@ -259,11 +261,60 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="sc_preprocess",
+            name="sc_preprocess_cpu",
             description=(
-                "Preprocess integrated h5ad: normalize, log1p, HVG selection, scale, PCA, "
-                "Harmony batch correction, neighbor graph, UMAP, and Leiden clustering. "
-                "Must be called after sc_integrate."
+                "Preprocess integrated h5ad on CPU: normalize, log1p, HVG selection, scale, PCA, "
+                "Harmony batch correction (harmonypy), neighbor graph, UMAP, and Leiden clustering. "
+                "Must be called after sc_integrate. Use when no GPU is available."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "input_path": {
+                        "type": "string",
+                        "description": "Path to integrated h5ad (default: ./sc_data/integrated.h5ad)",
+                        "default": "./sc_data/integrated.h5ad",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Path to save processed h5ad (default: ./sc_data/integrated_processed.h5ad)",
+                        "default": "./sc_data/integrated_processed.h5ad",
+                    },
+                    "batch_key": {
+                        "type": "string",
+                        "description": "Obs column to use as batch key for Harmony (default: sample)",
+                        "default": "sample",
+                    },
+                    "n_top_genes": {
+                        "type": "integer",
+                        "description": "Number of highly variable genes to select (default: 2000)",
+                        "default": 2000,
+                    },
+                    "n_pcs": {
+                        "type": "integer",
+                        "description": "Number of PCs to compute (default: 50)",
+                        "default": 50,
+                    },
+                    "n_neighbors": {
+                        "type": "integer",
+                        "description": "Number of neighbors for graph (default: 15)",
+                        "default": 15,
+                    },
+                    "resolution": {
+                        "type": "number",
+                        "description": "Leiden clustering resolution (default: 0.5)",
+                        "default": 0.5,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="sc_preprocess_gpu",
+            description=(
+                "Preprocess integrated h5ad on GPU: normalize, log1p, HVG selection, scale, PCA, "
+                "Harmony batch correction, neighbor graph, UMAP, and Leiden clustering — all GPU-accelerated "
+                "via rapids-singlecell (CUDA). Must be called after sc_integrate. Requires a CUDA GPU."
             ),
             inputSchema={
                 "type": "object",
@@ -356,7 +407,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         "convert_geo_to_h5ad": convert_geo_to_h5ad,
         "sc_qc": sc_qc,
         "sc_integrate": sc_integrate,
-        "sc_preprocess": sc_preprocess,
+        "sc_preprocess_cpu": sc_preprocess_cpu,
+        "sc_preprocess_gpu": sc_preprocess_gpu,
     }
 
     if name not in dispatch:

@@ -11,3 +11,6 @@ wheels/
 
 # Environment variables (API keys)
 .env
+
+# Single-cell data (large files)
+sc_data/

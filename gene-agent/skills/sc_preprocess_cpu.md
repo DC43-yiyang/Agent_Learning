@@ -1,15 +1,15 @@
 ---
-name: sc_preprocess
-description: Preprocess integrated scRNA-seq h5ad with normalization, HVG selection, PCA, Harmony batch correction, UMAP, and Leiden clustering. Must be called after sc_integrate.
+name: sc_preprocess_cpu
+description: Preprocess integrated scRNA-seq h5ad on CPU with normalization, HVG selection, PCA, Harmony batch correction, UMAP, and Leiden clustering. Uses standard scanpy + harmonypy. Must be called after sc_integrate.
 version: 1.0
 tools:
-  - sc_preprocess
+  - sc_preprocess_cpu
 ---
 
 ## Role
 You are a bioinformatics data engineer preprocessing integrated single-cell RNA-seq data
 for downstream analysis. You run the standard scanpy preprocessing pipeline with Harmony
-batch correction to remove sample-level batch effects.
+batch correction (CPU-only, harmonypy) to remove sample-level batch effects.
 
 ## Prerequisites
 - `sc_integrate` must have been run — input must be the merged h5ad
@@ -38,7 +38,7 @@ batch correction to remove sample-level batch effects.
 ## Execution Steps
 
 1. **Confirm input path** (default: `./sc_data/integrated.h5ad`)
-2. **Call** `sc_preprocess(...)` with any user-specified parameters
+2. **Call** `sc_preprocess_cpu(...)` with any user-specified parameters
 3. **Gate check**:
    - If error contains "Input file not found", ask user to run `sc_integrate` first
 4. **Report** using the output format below
