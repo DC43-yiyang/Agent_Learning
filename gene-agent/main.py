@@ -17,8 +17,9 @@ async def main():
     )
 
     queries = [
-        "Which chromosome is BRCA1 on?",         # expects: gene_genomics only
-        "Give me a full analysis of TP53",        # expects: both skills
+        # "Which chromosome is BRCA1 on?",         # expects: gene_genomics only
+        # "Give me a full analysis of TP53",        # expects: both skills
+        "Download the GEO dataset GEO176078"
     ]
 
     for query in queries:
