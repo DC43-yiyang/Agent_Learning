@@ -13,6 +13,8 @@ dist/
 *.swp
 *.swo
 
+.sc_data/
+
 # OS
 .DS_Store
 Thumbs.db
