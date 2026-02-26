@@ -18,6 +18,7 @@ from tools.geo_download import download_geo_raw, convert_geo_to_h5ad
 from tools.sc_integrate import sc_qc, sc_integrate
 from tools.sc_preprocess_cpu import sc_preprocess_cpu
 from tools.sc_preprocess_gpu import sc_preprocess_gpu
+from tools.sc_celltypist import sc_celltypist
 
 
 # ─────────────────────────────────────────────
@@ -359,6 +360,51 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="sc_celltypist",
+            description=(
+                "Annotate cell types in a preprocessed scRNA-seq h5ad using CellTypist. "
+                "Supports majority voting over Leiden clusters to refine per-cell predictions. "
+                "Must be called after sc_preprocess_cpu or sc_preprocess_gpu. "
+                "Adds celltypist_cell_type, celltypist_majority_voting, and celltypist_conf_score to obs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "input_path": {
+                        "type": "string",
+                        "description": "Path to preprocessed h5ad (default: ./sc_data/integrated_rapids_processed.h5ad)",
+                        "default": "./sc_data/integrated_rapids_processed.h5ad",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Path to save annotated h5ad (default: ./sc_data/integrated_celltypist.h5ad)",
+                        "default": "./sc_data/integrated_celltypist.h5ad",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "CellTypist model name (default: Cells_Adult_Breast.pkl)",
+                        "default": "Cells_Adult_Breast.pkl",
+                    },
+                    "majority_voting": {
+                        "type": "boolean",
+                        "description": "Refine labels by majority vote within clusters (default: true)",
+                        "default": True,
+                    },
+                    "over_clustering": {
+                        "type": "string",
+                        "description": "Obs column used for majority voting (default: leiden_r1)",
+                        "default": "leiden_r1",
+                    },
+                    "use_raw": {
+                        "type": "boolean",
+                        "description": "Use adata.raw for annotation if available (default: true)",
+                        "default": True,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
             name="convert_geo_to_h5ad",
             description=(
                 "Convert previously downloaded raw GEO files into AnnData .h5ad files. "
@@ -409,6 +455,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         "sc_integrate": sc_integrate,
         "sc_preprocess_cpu": sc_preprocess_cpu,
         "sc_preprocess_gpu": sc_preprocess_gpu,
+        "sc_celltypist": sc_celltypist,
     }
 
     if name not in dispatch:

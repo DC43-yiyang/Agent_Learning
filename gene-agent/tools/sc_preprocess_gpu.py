@@ -57,6 +57,22 @@ def sc_preprocess_gpu(
 
     rsc.get.anndata_to_CPU(adata)
 
+    # Ensure adata.raw.X is on CPU (rapids anndata_to_CPU skips raw)
+    if adata.raw is not None:
+        import scipy.sparse as sp
+        raw_X = adata.raw.X
+        if hasattr(raw_X, "get"):          # cupy array
+            raw_X = raw_X.get()
+        elif hasattr(raw_X, "toarray"):    # cupy sparse
+            try:
+                raw_X = raw_X.get()
+            except AttributeError:
+                pass
+        if not sp.issparse(raw_X):
+            raw_X = sp.csr_matrix(raw_X)
+        import anndata
+        adata.raw = anndata.Raw(adata, X=raw_X)
+
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     adata.write_h5ad(output_path)
 
